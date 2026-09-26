@@ -2,8 +2,9 @@
 SOFIA - Hand Tracking (Stage 2: posture recognition)
 -----------------------------------------------------
 Tracks a hand via the laptop webcam using MediaPipe's HandLandmarker
-(current Tasks API), computes a stable "palm centroid" point, and smooths
-it with an exponential moving average (EMA) to remove landmark jitter.
+(current Tasks API). The gesture recognizer (gestures.py) smooths the
+landmarks and the "palm centroid" with exponential moving averages (EMA)
+to remove landmark jitter; here we draw both the raw and smoothed centroid.
 
 On top of tracking, it recognizes the five SOFIA gestures (see
 gestures.py) and shows the SOFIA motion each one will trigger.
@@ -33,7 +34,6 @@ from gestures import SOFIA_ACTIONS, GestureRecognizer
 # Config
 # ---------------------------------------------------------------------------
 CAM_INDEX = 0
-SMOOTHING_ALPHA = 0.35     # 0 = max smoothing/lag, 1 = no smoothing (raw)
 MAX_HANDS = 1
 DETECTION_CONF = 0.6
 TRACKING_CONF = 0.6
@@ -44,10 +44,6 @@ MODEL_URL = (
     "https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
     "hand_landmarker/float16/latest/hand_landmarker.task"
 )
-
-# Landmarks used to build the palm centroid (wrist + index/middle/pinky MCP)
-# See: https://developers.google.com/mediapipe/solutions/vision/hand_landmarker
-PALM_LANDMARK_IDS = [0, 5, 9, 17]
 
 # Standard 21-point hand skeleton connections (replaces the old
 # mp.solutions.hands.HAND_CONNECTIONS, which no longer exists)
@@ -69,31 +65,17 @@ def ensure_model():
         print("Done.")
 
 
-# ---------------------------------------------------------------------------
-# Smoothing helper
-# ---------------------------------------------------------------------------
-class EMAFilter:
-    """Simple exponential moving average filter for a 2D point."""
-
-    def __init__(self, alpha: float):
-        self.alpha = alpha
-        self.value = None
-
-    def update(self, new_point: np.ndarray) -> np.ndarray:
-        if self.value is None:
-            self.value = new_point
-        else:
-            self.value = self.alpha * new_point + (1 - self.alpha) * self.value
-        return self.value
-
-
-def get_palm_centroid(landmarks, frame_w, frame_h) -> np.ndarray:
-    """Average a fixed set of palm landmarks into one (x, y) pixel point."""
-    pts = []
-    for idx in PALM_LANDMARK_IDS:
-        lm = landmarks[idx]
-        pts.append((lm.x * frame_w, lm.y * frame_h))
-    return np.mean(pts, axis=0)
+def create_detector():
+    """Build the MediaPipe HandLandmarker in VIDEO mode."""
+    base_options = mp_python.BaseOptions(model_asset_path=MODEL_PATH)
+    options = mp_vision.HandLandmarkerOptions(
+        base_options=base_options,
+        running_mode=mp_vision.RunningMode.VIDEO,
+        num_hands=MAX_HANDS,
+        min_hand_detection_confidence=DETECTION_CONF,
+        min_tracking_confidence=TRACKING_CONF,
+    )
+    return mp_vision.HandLandmarker.create_from_options(options)
 
 
 def draw_hand(frame, landmarks, w, h):
@@ -114,6 +96,10 @@ def parse_args():
         "--debug", action="store_true",
         help="Show per-finger extended flags (for threshold tuning)",
     )
+    parser.add_argument(
+        "--no-smooth", action="store_true",
+        help="Disable landmark/centroid smoothing (for comparison)",
+    )
     return parser.parse_args()
 
 
@@ -121,25 +107,17 @@ def main():
     args = parse_args()
     ensure_model()
 
-    base_options = mp_python.BaseOptions(model_asset_path=MODEL_PATH)
-    options = mp_vision.HandLandmarkerOptions(
-        base_options=base_options,
-        running_mode=mp_vision.RunningMode.VIDEO,
-        num_hands=MAX_HANDS,
-        min_hand_detection_confidence=DETECTION_CONF,
-        min_tracking_confidence=TRACKING_CONF,
-    )
-    detector = mp_vision.HandLandmarker.create_from_options(options)
+    detector = create_detector()
 
     cap = cv2.VideoCapture(args.camera)
     if not cap.isOpened():
         raise RuntimeError(f"Could not open camera index {args.camera}")
     print(f"Using camera index {args.camera}")
 
-    smoother = EMAFilter(SMOOTHING_ALPHA)
-    recognizer = GestureRecognizer()
+    recognizer = GestureRecognizer(smoothing=not args.no_smooth)
     banner, banner_until = None, 0.0
     start_time = time.time()
+    fps, last_frame = 0.0, start_time
 
     while cap.isOpened():
         ok, frame = cap.read()
@@ -161,14 +139,14 @@ def main():
 
             draw_hand(frame, landmarks, w, h)
 
-            raw_centroid = get_palm_centroid(landmarks, w, h)
-            smoothed = smoother.update(raw_centroid)
+            now = time.time()
+            posture, event = recognizer.update(landmarks, now, w, h)
 
-            sx, sy = int(smoothed[0]), int(smoothed[1])
+            raw_c, smooth_c = recognizer.raw_centroid, recognizer.centroid
+            sx, sy = int(smooth_c[0]), int(smooth_c[1])
 
-            # Draw raw (small, faint) vs smoothed (large, solid) point
-            cv2.circle(frame, (int(raw_centroid[0]), int(raw_centroid[1])),
-                       4, (0, 0, 255), -1)
+            # Draw raw (small, red) vs smoothed (large, green) point
+            cv2.circle(frame, (int(raw_c[0]), int(raw_c[1])), 4, (0, 0, 255), -1)
             cv2.circle(frame, (sx, sy), 10, (0, 255, 0), -1)
 
             # Normalized coords (0-1) - useful later for panel mapping
@@ -183,8 +161,6 @@ def main():
                 2,
             )
 
-            now = time.time()
-            posture, event = recognizer.update(landmarks, now, w, h)
             cv2.putText(
                 frame, f"posture: {posture or '-'}", (10, 60),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2,
@@ -203,14 +179,21 @@ def main():
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1,
                 )
         else:
-            smoother.value = None  # reset filter when hand is lost
-            recognizer.reset()
+            recognizer.reset()  # also clears the smoothing filters
             cv2.putText(
                 frame, "no hand detected", (10, 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2,
             )
 
-        if banner and time.time() < banner_until:
+        now = time.time()
+        fps = 0.9 * fps + 0.1 / max(now - last_frame, 1e-6)
+        last_frame = now
+        cv2.putText(
+            frame, f"{fps:.0f} FPS" + ("  (no smoothing)" if args.no_smooth else ""),
+            (w - 230, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2,
+        )
+
+        if banner and now < banner_until:
             cv2.putText(
                 frame, banner, (10, h - 20),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 200, 255), 2,

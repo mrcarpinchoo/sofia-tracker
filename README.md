@@ -1,8 +1,9 @@
 # SOFIA Tracker
 
 Webcam hand tracking and gesture recognition for SOFIA. It uses MediaPipe's
-HandLandmarker to track one hand, smooths a palm-centroid point, and
-recognizes five gestures, each mapped to a SOFIA motion.
+HandLandmarker to track one hand, smooths the landmarks and a palm-centroid
+point, and recognizes five gestures (two static, three dynamic), each mapped
+to a SOFIA motion.
 
 At this stage, gestures are only shown on screen and printed to the console.
 They aren't sent to the simulation or the servos yet.
@@ -13,13 +14,18 @@ They aren't sent to the simulation or the servos yet.
 |---|---|---|
 | Index finger (only the index extended) | static | Look up, then down |
 | V sign (index + middle extended) | static | Draw a horizontal 8 |
-| Open palm (all five fingers extended) | static | Look right, then left |
+| Wave (open palm moving side to side) | dynamic | Look right, then left |
 | Swipe left / right | dynamic | Sweeping wave in the swipe direction |
 | Grab (open palm → fist) | dynamic | Flinch / return to rest |
 
-Static postures fire after you hold the hand **still** for about 0.5 s, so a
-swipe with an open palm doesn't also trigger "open palm". Holding a posture
-fires it only once.
+Static postures fire after you hold the hand **still** for about 0.5 s.
+Holding a posture fires it only once. A plain open palm held still fires
+nothing: it only counts as a wave when it oscillates horizontally for about
+a second. A single large, fast stroke is a swipe, not a wave.
+
+Smoothing (an EMA on the 21 landmarks and on the palm centroid, plus a
+5-frame majority vote) is on by default. Use `--no-smooth` to turn it off and
+compare.
 
 ## Requirements
 
@@ -73,14 +79,38 @@ Run the tracker:
 python tracker.py                 # default camera (index 0)
 python tracker.py --camera 1      # a specific camera
 python tracker.py --debug         # also show which fingers are detected as extended
+python tracker.py --no-smooth     # disable smoothing (for comparison)
 ```
 
 Press `q` to quit. Type `deactivate` to leave the virtual environment.
 
+### Experiments
+
+Run a guided session per user and lighting condition (`bright`, `normal`,
+`dim` or `backlight`). It asks for each gesture in random order, then
+records 20 s of idle movement to count false positives:
+
+```bash
+python evaluate.py --user U1 --light dim                # smoothing on
+python evaluate.py --user U1 --light dim --no-smooth    # baseline
+python evaluate.py --user U1 --light dim --trials 10    # more repetitions
+```
+
+Each session writes a CSV to `results/`. Then generate the tables and the
+confusion matrix:
+
+```bash
+python analyze.py     # writes results/summary.md and results/confusion.png
+```
+
 ## Files
 
-- `tracker.py`: main loop. Captures the camera, detects the hand, smooths the palm centroid and draws the overlay.
-- `gestures.py`: posture classification and the gesture recognizer. The tuning thresholds are at the top of the file.
+- `tracker.py`: main loop. Captures the camera, detects the hand and draws the overlay (raw and smoothed palm centroid, posture, FPS).
+- `gestures.py`: posture classification, smoothing filters and the gesture recognizer. The tuning thresholds are at the top of the file.
+- `evaluate.py`: guided test sessions that log one CSV row per trial.
+- `analyze.py`: turns the CSVs in `results/` into `summary.md` and `confusion.png`.
+- `results/`: experiment data (CSVs) and generated summaries.
+- `DETECCION_Y_EVALUACION.md`: detection rules, smoothing and evaluation protocol (Spanish).
 - `find_camera.py`: previews each camera index so you can find your webcam.
 - `requirements.txt`: Python dependencies.
 
@@ -91,5 +121,5 @@ Press `q` to quit. Type `deactivate` to leave the virtual environment.
 - **Gestures misfire or don't trigger.** Run with `--debug` and adjust the
   thresholds at the top of `gestures.py`. The main ones are
   `FINGER_EXT_RATIO` (when a finger counts as extended), `SWIPE_RATIO` (how
-  far a swipe must travel) and `HOLD_TIME` (how long a static posture must
+  far a swipe must travel), `WAVE_AMP_RATIO` (how big each wave stroke must be) and `HOLD_TIME` (how long a static posture must
   be held).
