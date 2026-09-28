@@ -2,7 +2,7 @@
 
 Webcam hand tracking and gesture recognition for SOFIA. It uses MediaPipe's
 HandLandmarker to track one hand, smooths the landmarks and a palm-centroid
-point, and recognizes five gestures (two static, three dynamic), each mapped
+point, and recognizes five gestures (three static, two dynamic), each mapped
 to a SOFIA motion.
 
 At this stage, gestures are only shown on screen and printed to the console.
@@ -14,14 +14,14 @@ They aren't sent to the simulation or the servos yet.
 |---|---|---|
 | Index finger (only the index extended) | static | Look up, then down |
 | V sign (index + middle extended) | static | Draw a horizontal 8 |
-| Wave (open palm moving side to side) | dynamic | Look right, then left |
+| Open palm (all five fingers extended) | static | Look right, then left |
 | Swipe left / right | dynamic | Sweeping wave in the swipe direction |
 | Grab (open palm → fist) | dynamic | Flinch / return to rest |
 
 Static postures fire after you hold the hand **still** for about 0.5 s.
-Holding a posture fires it only once. A plain open palm held still fires
-nothing: it only counts as a wave when it oscillates horizontally for about
-a second. A single large, fast stroke is a swipe, not a wave.
+Holding a posture fires it only once. Because the open palm is a static
+posture, opening your hand and pausing before a grab will fire it
+first; close the hand within about 0.5 s to get only the grab.
 
 Smoothing (an EMA on the 21 landmarks and on the palm centroid, plus a
 5-frame majority vote) is on by default. Use `--no-smooth` to turn it off and
@@ -121,5 +121,5 @@ python analyze.py     # writes results/summary.md and results/confusion.png
 - **Gestures misfire or don't trigger.** Run with `--debug` and adjust the
   thresholds at the top of `gestures.py`. The main ones are
   `FINGER_EXT_RATIO` (when a finger counts as extended), `SWIPE_RATIO` (how
-  far a swipe must travel), `WAVE_AMP_RATIO` (how big each wave stroke must be) and `HOLD_TIME` (how long a static posture must
+  far a swipe must travel) and `HOLD_TIME` (how long a static posture must
   be held).

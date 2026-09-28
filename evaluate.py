@@ -26,11 +26,11 @@ from gestures import GestureRecognizer
 from tracker import CAM_INDEX, create_detector, draw_hand, ensure_model
 
 LIGHTS = ("bright", "normal", "dim", "backlight")
-GESTURES = ("INDEX", "V", "WAVE", "SWIPE_LEFT", "SWIPE_RIGHT", "GRAB")
+GESTURES = ("INDEX", "V", "PALM", "SWIPE_LEFT", "SWIPE_RIGHT", "GRAB")
 HINTS = {
     "INDEX": "hold up your index finger, still",
     "V": "hold up index + middle finger (V), still",
-    "WAVE": "wave your open palm side to side",
+    "PALM": "show your open palm and hold it still",
     "SWIPE_LEFT": "sweep your open hand quickly to the LEFT",
     "SWIPE_RIGHT": "sweep your open hand quickly to the RIGHT",
     "GRAB": "open palm, then close it into a fist",

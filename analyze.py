@@ -21,7 +21,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
-GESTURES = ["INDEX", "V", "WAVE", "SWIPE_LEFT", "SWIPE_RIGHT", "GRAB"]
+GESTURES = ["INDEX", "V", "PALM", "SWIPE_LEFT", "SWIPE_RIGHT", "GRAB"]
 LIGHT_ORDER = ["bright", "normal", "dim", "backlight"]
 
 

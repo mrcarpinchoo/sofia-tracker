@@ -3,12 +3,12 @@ SOFIA - Posture / gesture recognition
 -------------------------------------
 Classifies MediaPipe hand landmarks into the five SOFIA gestures:
 
-  static  : INDEX (look up/down), V (horizontal 8)
-  dynamic : WAVE (open palm waving side to side -> look right/left),
-            SWIPE_LEFT / SWIPE_RIGHT (sweeping wave), GRAB (open -> fist)
+  static  : INDEX (look up/down), V (horizontal 8),
+            PALM (open palm held still -> look right/left)
+  dynamic : SWIPE_LEFT / SWIPE_RIGHT (sweeping wave), GRAB (open -> fist)
 
-PALM (all five fingers extended) is still a posture *label*, because WAVE
-and GRAB depend on it, but it no longer fires an event by itself.
+PALM is an open hand (all five fingers extended). It is also the
+starting posture of GRAB.
 
 Smoothing happens at three levels: an EMA over the 21 landmarks (before
 finger classification), an EMA over the palm centroid (for the motion
@@ -39,18 +39,11 @@ SWIPE_WINDOW = 0.4         # s
 SWIPE_RATIO = 2.5          # min |dx| (x palm width)
 SWIPE_COOLDOWN = 1.0       # s
 
-WAVE_WINDOW = 1.5          # s: PALM must hold for the whole window
-WAVE_MIN_SPAN = 0.75       # s of history required before WAVE can fire
-WAVE_REVERSALS = 2         # min direction changes of the centroid x
-WAVE_AMP_RATIO = 0.6       # hysteresis: min stroke (x palm width)
-WAVE_HORIZ_RATIO = 2.0     # x-range must exceed this x the y-range
-WAVE_COOLDOWN = 1.5        # s
-
 GRAB_WINDOW = 0.6          # s: PALM must have been seen this recently
 GRAB_FIST_FRAMES = 3       # consecutive raw FIST frames
 GRAB_COOLDOWN = 1.0        # s
 
-HISTORY_SECONDS = 1.5      # must be >= WAVE_WINDOW
+HISTORY_SECONDS = 1.0      # must be >= HOLD_TIME, SWIPE_WINDOW and GRAB_WINDOW
 
 WRIST = 0
 FINGERS = {                # name: (tip, pip)
@@ -63,12 +56,12 @@ THUMB_TIP, THUMB_IP = 4, 3
 INDEX_MCP, PINKY_MCP = 5, 17
 PALM_LANDMARK_IDS = [0, 5, 9, 17]
 
-STATIC_POSTURES = ("INDEX", "V")
+STATIC_POSTURES = ("INDEX", "V", "PALM")
 
 SOFIA_ACTIONS = {
     "INDEX": "look up, then down",
     "V": "draw a horizontal 8",
-    "WAVE": "look right, then left",
+    "PALM": "look right, then left",
     "SWIPE_LEFT": "sweeping wave to the left",
     "SWIPE_RIGHT": "sweeping wave to the right",
     "GRAB": "flinch / return to rest",
@@ -131,35 +124,6 @@ def classify_posture(ext: dict):
     return None
 
 
-def _count_reversals(xs, min_amp: float) -> int:
-    """Count direction changes of a 1D signal, ignoring strokes < min_amp.
-
-    A reversal only counts once the signal has moved back more than
-    `min_amp` from the last extreme (hysteresis), so jitter is ignored.
-    """
-    direction = 0            # +1 rising, -1 falling, 0 not yet decided
-    extreme = xs[0]
-    count = 0
-    for x in xs[1:]:
-        if direction == 0:
-            if abs(x - extreme) > min_amp:
-                direction = 1 if x > extreme else -1
-                extreme = x
-        elif direction > 0:
-            if x > extreme:
-                extreme = x
-            elif extreme - x > min_amp:
-                direction, extreme = -1, x
-                count += 1
-        else:
-            if x < extreme:
-                extreme = x
-            elif x - extreme > min_amp:
-                direction, extreme = 1, x
-                count += 1
-    return count
-
-
 class GestureRecognizer:
     """Turns a stream of landmarks into (posture, event) pairs."""
 
@@ -220,18 +184,6 @@ class GestureRecognizer:
         if abs(dx) > SWIPE_RATIO * palm_w and abs(dx) > 2 * abs(dy):
             event = "SWIPE_RIGHT" if dx > 0 else "SWIPE_LEFT"
             return posture, self._fire(event, t, SWIPE_COOLDOWN)
-
-        # Wave: open palm all along the window, oscillating horizontally
-        wave = [e for e in self.history if t - e[0] <= WAVE_WINDOW]
-        if (
-            t - wave[0][0] >= WAVE_MIN_SPAN
-            and all(e[2] == "PALM" for e in wave)
-        ):
-            xs = [e[1][0] for e in wave]
-            ys = [e[1][1] for e in wave]
-            horizontal = (max(xs) - min(xs)) > WAVE_HORIZ_RATIO * (max(ys) - min(ys))
-            if horizontal and _count_reversals(xs, WAVE_AMP_RATIO * palm_w) >= WAVE_REVERSALS:
-                return posture, self._fire("WAVE", t, WAVE_COOLDOWN)
 
         # Grab: recent open palm, now a sustained fist
         fist_now = (
