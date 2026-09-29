@@ -110,7 +110,8 @@ python analyze.py     # writes results/summary.md and results/confusion.png
 - `evaluate.py`: guided test sessions that log one CSV row per trial.
 - `analyze.py`: turns the CSVs in `results/` into `summary.md` and `confusion.png`.
 - `results/`: experiment data (CSVs) and generated summaries.
-- `DETECCION_Y_EVALUACION.md`: detection rules, smoothing and evaluation protocol (Spanish).
+- `docs/JUSTIFICACION.md`: design justification (Spanish).
+- `docs/DETECCION_Y_EVALUACION.md`: detection rules, smoothing, evaluation protocol and results (Spanish).
 - `find_camera.py`: previews each camera index so you can find your webcam.
 - `requirements.txt`: Python dependencies.
 
