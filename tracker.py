@@ -118,6 +118,9 @@ def main():
     banner, banner_until = None, 0.0
     start_time = time.time()
     fps, last_frame = 0.0, start_time
+    # MediaPipe needs strictly increasing timestamps; the wall clock can jump
+    # back and two frames can land on the same millisecond.
+    clock_start, last_ts = time.monotonic(), -1
 
     while cap.isOpened():
         ok, frame = cap.read()
@@ -130,7 +133,8 @@ def main():
 
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-        timestamp_ms = int((time.time() - start_time) * 1000)
+        timestamp_ms = max(int((time.monotonic() - clock_start) * 1000), last_ts + 1)
+        last_ts = timestamp_ms
 
         result = detector.detect_for_video(mp_image, timestamp_ms)
 

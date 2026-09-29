@@ -33,7 +33,7 @@ HINTS = {
     "PALM": "show your open palm and hold it still",
     "SWIPE_LEFT": "sweep your open hand quickly to the LEFT",
     "SWIPE_RIGHT": "sweep your open hand quickly to the RIGHT",
-    "GRAB": "open palm, then close it into a fist",
+    "GRAB": "open palm, then QUICKLY close it into a fist",
 }
 
 READY_SECONDS = 2.0
@@ -74,7 +74,8 @@ class Session:
         if not self.cap.isOpened():
             raise RuntimeError(f"Could not open camera index {args.camera}")
         self.recognizer = GestureRecognizer(smoothing=not args.no_smooth)
-        self.start = time.time()
+        # Monotonic and strictly increasing, as MediaPipe requires
+        self.start, self.last_ts = time.monotonic(), -1
 
     def step(self):
         """Grab + process one frame. Returns a dict with the frame and stats."""
@@ -87,7 +88,8 @@ class Session:
         t0 = time.perf_counter()
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-        ts_ms = int((time.time() - self.start) * 1000)
+        ts_ms = max(int((time.monotonic() - self.start) * 1000), self.last_ts + 1)
+        self.last_ts = ts_ms
         result = self.detector.detect_for_video(mp_image, ts_ms)
 
         now = time.time()
