@@ -223,7 +223,7 @@ dos modos para medir el efecto del suavizado.
 |---|---|
 | Usuarios | 3 a 5 personas distintas (`U1`, `U2`, …) |
 | Iluminación | `bright` (luz intensa), `normal`, `dim` (poca luz) y `backlight` (contraluz) |
-| Repeticiones | 5 por gesto (`--trials 5`), en orden aleatorio: 6 gestos × 5 = 30 pruebas |
+| Repeticiones | 2 por gesto (`--trials 2`), en orden aleatorio: 6 gestos × 2 = 12 pruebas |
 | Duración de cada prueba | 2 s de preparación y 4 s de registro |
 | Segmento en reposo | 20 s moviendo la mano de forma natural, **sin** hacer gestos |
 | Modos | Con suavizado y sin suavizado (`--no-smooth`) |
@@ -262,9 +262,9 @@ estáticas). Sirve para comparar modos, no como latencia pura del sistema.
 source .venv/bin/activate
 
 # Una sesión por usuario y condición de luz
-python evaluate.py --user U1 --light normal
-python evaluate.py --user U1 --light normal --no-smooth
-python evaluate.py --user U1 --light dim
+python evaluate.py --user U1 --light normal --trials 2
+python evaluate.py --user U1 --light normal --trials 2 --no-smooth
+python evaluate.py --user U1 --light dim --trials 2
 # ...
 
 # Generar tablas y matriz de confusión con todos los CSV
@@ -294,25 +294,174 @@ Esto valida la lógica, no el desempeño con personas reales.
 
 ### 3.5 Resultados
 
-> _Pendiente: pegar aquí `results/summary.md` cuando se hayan hecho las
-> sesiones con usuarios reales._
+> **Ronda preliminar.** Se hizo solo una parte del protocolo de §3.1:
+> **un usuario** (`U1`), **las cuatro condiciones de luz**, **solo con
+> suavizado** y **2 repeticiones por gesto**. En total son 48 pruebas
+> (4 sesiones × 12) y 4 segmentos en reposo de 20 s. Faltan las sesiones
+> con más usuarios y con `--no-smooth`. Por eso, estos resultados **no
+> permiten** comparar usuarios ni medir el efecto del suavizado. Con 8
+> pruebas por gesto, un solo error cambia la tasa de acierto en 12.5
+> puntos.
+
+Datos: `results/U1_{normal,bright,dim,backlight}_smooth_*.csv`. Las tablas
+salen de `results/summary.md`, generado con `python analyze.py`. Las
+medianas y los desgloses por luz se calcularon con los mismos CSV.
 
 #### Tasa de acierto por gesto
 
-> _Pendiente._
+| Gesto | Aciertos | Tasa de acierto | Falsos negativos |
+|---|---|---|---|
+| INDEX | 8/8 | 100 % | 0 |
+| V | 8/8 | 100 % | 0 |
+| PALM | 8/8 | 100 % | 0 |
+| SWIPE_LEFT | 8/8 | 100 % | 0 |
+| SWIPE_RIGHT | 8/8 | 100 % | 0 |
+| GRAB | 7/8 | 87.5 % | 0 |
+| **Total** | **47/48** | **97.9 %** | **0** |
+
+El único error fue una prueba de GRAB (luz `bright`) en la que primero se
+disparó `PALM` y después `GRAB`. Es justo la interacción descrita en §1.7:
+la palma estuvo quieta 0.5 s antes de cerrarse. No hubo ninguna prueba sin
+evento (`NONE`).
 
 #### Tasa de acierto por usuario y por condición de iluminación
 
-> _Pendiente._
+| Luz | Aciertos | Tasa de acierto | Brillo medido (0–255) | FPS promedio |
+|---|---|---|---|---|
+| `bright` | 11/12 | 91.7 % | 130.3 | 25.9 |
+| `normal` | 12/12 | 100 % | 133.2 | 25.9 |
+| `dim` | 12/12 | 100 % | 48.0 | **15.0** |
+| `backlight` | 12/12 | 100 % | 111.2 | 27.2 |
+
+Solo participó `U1` (47/48, 97.9 %), así que no hay comparación entre
+usuarios.
+
+Observaciones:
+
+- **`bright` y `normal` son prácticamente la misma condición.** El brillo
+  medido casi no cambia (130 contra 133). Lo más probable es que la
+  exposición automática de la cámara compense la luz extra. El error en
+  `bright` no se debe a la luz, sino a la interacción PALM → GRAB. Para
+  que `bright` sea una condición distinta, hace falta una fuente de luz
+  más intensa o fijar la exposición de la cámara.
+- **Con poca luz, la cámara baja a 15 FPS.** El brillo medido fue 48. La
+  precisión no bajó, pero el tiempo de respuesta sí subió (ver abajo).
+- **El contraluz no afectó el reconocimiento.** Las 12 pruebas fueron
+  correctas.
 
 #### Tiempo de respuesta y FPS promedio
 
-> _Pendiente._
+El tiempo de respuesta se mide desde el inicio de la ventana de registro,
+así que incluye la reacción del usuario (§3.2). Algunas pruebas tardaron
+más de 3 s porque el usuario empezó tarde. Por eso se reporta la
+**mediana**, que no se deja arrastrar por esos casos, junto con la media
+de `summary.md`.
+
+| Gesto | Mediana | Media | Mín. – máx. |
+|---|---|---|---|
+| INDEX | 0.55 s | 0.55 s | 0.54 – 0.58 s |
+| V | 0.57 s | 0.62 s | 0.55 – 0.97 s |
+| PALM | 0.55 s | 1.23 s | 0.52 – 3.51 s |
+| SWIPE_LEFT | 1.12 s | 1.24 s | 0.58 – 2.04 s |
+| SWIPE_RIGHT | 1.25 s | 1.33 s | 0.77 – 2.04 s |
+| GRAB | 0.52 s | 1.19 s | 0.23 – 3.39 s |
+| **Todos** | **0.58 s** | **1.02 s** | |
+
+| Luz | Mediana (todos) | Mediana (SWIPE) |
+|---|---|---|
+| `bright` | 0.56 s | 1.12 s |
+| `normal` | 0.56 s | 0.92 s |
+| `dim` | 1.23 s | 1.94 s |
+| `backlight` | 1.04 s | 1.27 s |
+
+| Métrica | Valor |
+|---|---|
+| FPS promedio | 23.5 (15.0 en `dim`, 25–27 en las demás) |
+| Tiempo de procesamiento por cuadro | 6.4 ms en promedio (máx. 8.8 ms) |
+
+- Las posturas estáticas responden en unos **0.55 s**, que coincide con
+  el tiempo de sostenimiento de 0.5 s más un par de cuadros.
+- El procesamiento (detección + reglas) toma **menos de 9 ms** por
+  cuadro. Los FPS los limita la cámara, no el procesamiento.
+- En `dim`, SWIPE tarda casi el doble (1.94 s contra ~1 s). A 15 FPS
+  llegan menos cuadros durante el trazo, y la imagen se ve más borrosa.
 
 #### Falsos positivos (segmento en reposo)
 
-> _Pendiente._
+| Luz | Eventos en reposo | Mano visible en reposo | Eventos detectados |
+|---|---|---|---|
+| `bright` | 1 | 16 % (3.2 s) | INDEX |
+| `normal` | 3 | 30 % (6.0 s) | PALM, GRAB, PALM |
+| `dim` | 6 | 81 % (16.2 s) | PALM, GRAB, PALM, SWIPE_RIGHT, GRAB, GRAB |
+| `backlight` | 0 | 0 % (0 s) | — |
+| **Total** | **10** | **25.4 s de 80 s** | |
+
+`summary.md` reporta **7.5 falsos positivos por minuto**, que resulta de
+dividir 10 eventos entre 80 s. Pero ese número **subestima el problema**:
+la cantidad de eventos sigue al tiempo que la mano estuvo en cámara, no a
+la luz. En `backlight` la mano no apareció nunca, así que esa sesión no
+midió nada. Tomando solo el tiempo con la mano visible, son 10 eventos en
+25.4 s, es decir **unos 24 por minuto**.
+
+Casi todos los falsos positivos son `PALM` y `GRAB`. Al mover la mano con
+naturalidad, es fácil dejarla abierta y quieta medio segundo, o cerrarla
+justo después. Posibles mejoras, pendientes de probar:
+
+- Exigirle a PALM un tiempo de sostenimiento mayor (por ejemplo 1 s),
+  como ya propone §1.7.
+- Exigir que la palma esté de frente a la cámara, o cerca del centro de la
+  imagen, antes de aceptar PALM o GRAB.
+- Repetir el segmento en reposo pidiendo que la mano **se quede en
+  cámara** los 20 s, para medir la tasa de forma comparable entre
+  condiciones.
+
+Además hubo **4 eventos extra** dentro de las pruebas: `GRAB` después de
+`PALM` en dos pruebas de PALM (al bajar la mano cerrándola), el `GRAB` que
+siguió al `PALM` en la prueba fallida de GRAB, y un `PALM` repetido. Los
+eventos extra no cuentan para el acierto, porque solo cuenta el primer
+evento.
+
+#### Tasa de detección de la mano
+
+| Luz | Posturas estáticas y GRAB | SWIPE |
+|---|---|---|
+| `bright` | 66 % | 23 % |
+| `normal` | 51 % | 19 % |
+| `dim` | 100 % | 30 % |
+| `backlight` | 99 % | 22 % |
+
+Esta métrica depende más de **cómo se hizo la prueba** que de la luz. En
+SWIPE la mano entra y sale del cuadro, así que la tasa siempre es baja. En
+las demás pruebas, la diferencia entre condiciones probablemente se debe a
+si la mano se bajaba al terminar el gesto o se mantenía frente a la cámara,
+algo que no se controló. Con estos datos **no se puede concluir** que la poca luz o el contraluz mejoren la detección. Para
+medirla bien, la mano tendría que estar en cámara todo el tiempo de
+registro.
 
 #### Matriz de confusión
 
-> _Pendiente: insertar `results/confusion.png`._
+| esperado \ detectado | INDEX | V | PALM | SWIPE_LEFT | SWIPE_RIGHT | GRAB | NONE |
+|---|---|---|---|---|---|---|---|
+| INDEX | **8** | 0 | 0 | 0 | 0 | 0 | 0 |
+| V | 0 | **8** | 0 | 0 | 0 | 0 | 0 |
+| PALM | 0 | 0 | **8** | 0 | 0 | 0 | 0 |
+| SWIPE_LEFT | 0 | 0 | 0 | **8** | 0 | 0 | 0 |
+| SWIPE_RIGHT | 0 | 0 | 0 | 0 | **8** | 0 | 0 |
+| GRAB | 0 | 0 | 1 | 0 | 0 | **7** | 0 |
+
+![Matriz de confusión](../results/confusion.png)
+
+#### Conclusiones preliminares
+
+1. Con un solo usuario, el reconocedor acertó el **97.9 %** de las
+   pruebas. Las posturas estáticas responden en unos 0.55 s y el
+   procesamiento toma menos de 9 ms por cuadro.
+2. La poca luz no bajó la precisión, pero redujo la cámara a 15 FPS y
+   duplicó el tiempo de respuesta de SWIPE.
+3. El punto débil son los **falsos positivos en reposo** (unos 24 por
+   minuto con la mano en cámara), casi todos PALM y GRAB. Es lo primero
+   que hay que ajustar.
+4. La única confusión, GRAB → PALM, confirma la interacción prevista en
+   §1.7.
+5. Pendiente: más usuarios, la comparación con `--no-smooth` y un
+   segmento en reposo con la mano siempre en cámara.
