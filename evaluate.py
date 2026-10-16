@@ -14,16 +14,15 @@ logged are kept). Use analyze.py to turn the CSVs into tables and plots.
 
 import argparse
 import csv
+import logging
 import os
 import random
 import time
 from datetime import datetime
 
 import cv2
-import mediapipe as mp
 
-from gestures import GestureRecognizer
-from tracker import CAM_INDEX, create_detector, draw_hand, ensure_model
+from detection import CAM_INDEX, Camera, DetectionPipeline, draw_detection
 
 LIGHTS = ("bright", "normal", "dim", "backlight")
 GESTURES = ("INDEX", "V", "PALM", "SWIPE_LEFT", "SWIPE_RIGHT", "GRAB")
@@ -66,50 +65,35 @@ def put(frame, text, y, scale=0.7, color=(255, 255, 255)):
 
 
 class Session:
-    """Owns the camera, detector and recognizer; steps one frame at a time."""
+    """Owns the camera and detection pipeline; steps one frame at a time."""
 
     def __init__(self, args):
-        self.detector = create_detector()
-        self.cap = cv2.VideoCapture(args.camera)
-        if not self.cap.isOpened():
-            raise RuntimeError(f"Could not open camera index {args.camera}")
-        self.recognizer = GestureRecognizer(smoothing=not args.no_smooth)
-        # Monotonic and strictly increasing, as MediaPipe requires
-        self.start, self.last_ts = time.monotonic(), -1
+        self.camera = Camera(args.camera)
+        try:
+            self.pipeline = DetectionPipeline(smoothing=not args.no_smooth)
+        except Exception:
+            self.camera.close()
+            raise
 
     def step(self):
-        """Grab + process one frame. Returns a dict with the frame and stats."""
-        ok, frame = self.cap.read()
-        if not ok:
-            raise RuntimeError("Failed to read frame from camera")
-        frame = cv2.flip(frame, 1)
-        h, w = frame.shape[:2]
+        """Grab + process one frame. Returns a dict with the frame and stats.
 
-        t0 = time.perf_counter()
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-        ts_ms = max(int((time.monotonic() - self.start) * 1000), self.last_ts + 1)
-        self.last_ts = ts_ms
-        result = self.detector.detect_for_video(mp_image, ts_ms)
-
-        now = time.time()
-        event, has_hand = None, bool(result.hand_landmarks)
-        if has_hand:
-            landmarks = result.hand_landmarks[0]
-            _, event = self.recognizer.update(landmarks, now, w, h)
-            draw_hand(frame, landmarks, w, h)
-        else:
-            self.recognizer.reset()
-        proc_ms = (time.perf_counter() - t0) * 1000
-
+        "now" is a time.monotonic() timestamp.
+        """
+        frame = self.camera.read()
+        detection = self.pipeline.process(frame)
+        # Measured before drawing so the overlay doesn't bias it
+        brightness = float(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).mean())
+        draw_detection(frame, detection)
         return {
-            "frame": frame, "now": now, "event": event, "has_hand": has_hand,
-            "proc_ms": proc_ms,
-            "brightness": float(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).mean()),
+            "frame": frame, "now": detection.timestamp, "event": detection.event,
+            "has_hand": detection.hand_found, "proc_ms": detection.proc_ms,
+            "brightness": brightness,
         }
 
     def close(self):
-        self.cap.release()
+        self.pipeline.close()
+        self.camera.close()
         cv2.destroyAllWindows()
 
 
@@ -134,22 +118,22 @@ def wait_for_space(sess, message):
 
 def run_segment(sess, expected, duration, header, ready=READY_SECONDS):
     """Ready countdown, then record. Returns stats dict or None if aborted."""
-    end = time.time() + ready
-    while time.time() < end:
+    end = time.monotonic() + ready
+    while time.monotonic() < end:
         s = sess.step()
         put(s["frame"], header, 30, 0.6)
-        put(s["frame"], f"Get ready: {expected}  ({end - time.time():.0f})", 65,
+        put(s["frame"], f"Get ready: {expected}  ({end - time.monotonic():.0f})", 65,
             0.9, (0, 200, 255))
         if expected in HINTS:
             put(s["frame"], HINTS[expected], 95, 0.6, (0, 200, 255))
         if not show(s["frame"]):
             return None
 
-    sess.recognizer.reset()
+    sess.pipeline.reset()
     events, frames, hand_frames = [], 0, 0
     procs, brights = [], []
-    t_start = time.time()
-    while time.time() - t_start < duration:
+    t_start = time.monotonic()
+    while time.monotonic() - t_start < duration:
         s = sess.step()
         frames += 1
         hand_frames += s["has_hand"]
@@ -158,14 +142,14 @@ def run_segment(sess, expected, duration, header, ready=READY_SECONDS):
         if s["event"]:
             events.append((s["now"] - t_start, s["event"]))
         put(s["frame"], header, 30, 0.6)
-        put(s["frame"], f"REC {expected}  {duration - (time.time() - t_start):.1f}s",
+        put(s["frame"], f"REC {expected}  {duration - (time.monotonic() - t_start):.1f}s",
             65, 0.9, (0, 0, 255))
         if events:
             put(s["frame"], f"detected: {events[-1][1]}", 95, 0.7, (0, 255, 0))
         if not show(s["frame"]):
             return None
 
-    elapsed = time.time() - t_start
+    elapsed = time.monotonic() - t_start
     return {
         "events": events,
         "duration": elapsed,
@@ -206,7 +190,7 @@ def make_row(args, trial, expected, seg):
 
 def main():
     args = parse_args()
-    ensure_model()
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     os.makedirs(args.out, exist_ok=True)
 
     tag = "nosmooth" if args.no_smooth else "smooth"

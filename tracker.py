@@ -1,89 +1,38 @@
 """
 SOFIA - Hand Tracking (Stage 2: posture recognition)
 -----------------------------------------------------
-Tracks a hand via the laptop webcam using MediaPipe's HandLandmarker
-(current Tasks API). The gesture recognizer (gestures.py) smooths the
-landmarks and the "palm centroid" with exponential moving averages (EMA)
-to remove landmark jitter; here we draw both the raw and smoothed centroid.
+Command-line front end: shows the webcam with the detection overlay in an
+OpenCV window. Detection lives in detection.py and gesture recognition in
+gestures.py.
 
-On top of tracking, it recognizes the five SOFIA gestures (see
-gestures.py) and shows the SOFIA motion each one will trigger.
-
-Note: mediapipe deprecated the old `mp.solutions.hands` API back in 2023,
-and recent pip releases (0.10.10+) removed it outright, so this uses the
-replacement Tasks API instead.
+The recognizer smooths the landmarks and the "palm centroid" with
+exponential moving averages (EMA) to remove landmark jitter; here we draw
+both the raw and smoothed centroid. On top of tracking, it recognizes the
+five SOFIA gestures and shows the SOFIA motion each one will trigger.
 
 This stage only visualizes tracking and gestures - no module/servo math yet.
 Press 'q' to quit.
 """
 
 import argparse
-import os
+import logging
 import time
-import urllib.request
 
 import cv2
-import mediapipe as mp
-import numpy as np
-from mediapipe.tasks import python as mp_python
-from mediapipe.tasks.python import vision as mp_vision
 
-from gestures import SOFIA_ACTIONS, GestureRecognizer
-
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-CAM_INDEX = 0
-MAX_HANDS = 1
-DETECTION_CONF = 0.6
-TRACKING_CONF = 0.6
-BANNER_SECONDS = 1.5       # how long a recognized gesture stays on screen
-
-MODEL_PATH = "hand_landmarker.task"
-MODEL_URL = (
-    "https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
-    "hand_landmarker/float16/latest/hand_landmarker.task"
+from detection import (
+    CAM_INDEX,
+    Camera,
+    CameraError,
+    Detection,
+    DetectionPipeline,
+    FpsMeter,
+    draw_detection,
 )
+from gestures import SOFIA_ACTIONS
 
-# Standard 21-point hand skeleton connections (replaces the old
-# mp.solutions.hands.HAND_CONNECTIONS, which no longer exists)
-HAND_CONNECTIONS = [
-    (0, 1), (1, 2), (2, 3), (3, 4),          # thumb
-    (0, 5), (5, 6), (6, 7), (7, 8),          # index
-    (5, 9), (9, 10), (10, 11), (11, 12),     # middle
-    (9, 13), (13, 14), (14, 15), (15, 16),   # ring
-    (13, 17), (17, 18), (18, 19), (19, 20),  # pinky
-    (0, 17),                                 # palm base
-]
-
-
-def ensure_model():
-    """Download the hand landmarker model bundle if it's not present."""
-    if not os.path.exists(MODEL_PATH):
-        print(f"Downloading model to {MODEL_PATH} ...")
-        urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
-        print("Done.")
-
-
-def create_detector():
-    """Build the MediaPipe HandLandmarker in VIDEO mode."""
-    base_options = mp_python.BaseOptions(model_asset_path=MODEL_PATH)
-    options = mp_vision.HandLandmarkerOptions(
-        base_options=base_options,
-        running_mode=mp_vision.RunningMode.VIDEO,
-        num_hands=MAX_HANDS,
-        min_hand_detection_confidence=DETECTION_CONF,
-        min_tracking_confidence=TRACKING_CONF,
-    )
-    return mp_vision.HandLandmarker.create_from_options(options)
-
-
-def draw_hand(frame, landmarks, w, h):
-    pts_px = [(int(lm.x * w), int(lm.y * h)) for lm in landmarks]
-    for a, b in HAND_CONNECTIONS:
-        cv2.line(frame, pts_px[a], pts_px[b], (255, 255, 255), 2)
-    for x, y in pts_px:
-        cv2.circle(frame, (x, y), 3, (255, 180, 0), -1)
+BANNER_SECONDS = 1.5       # how long a recognized gesture stays on screen
+WINDOW = "SOFIA - Hand Tracking"
 
 
 def parse_args():
@@ -103,112 +52,79 @@ def parse_args():
     return parser.parse_args()
 
 
-def main():
-    args = parse_args()
-    ensure_model()
+def put_text(frame, text, origin, color, scale=0.6, thickness=2):
+    cv2.putText(
+        frame, text, origin, cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness,
+    )
 
-    detector = create_detector()
 
-    cap = cv2.VideoCapture(args.camera)
-    if not cap.isOpened():
-        raise RuntimeError(f"Could not open camera index {args.camera}")
-    print(f"Using camera index {args.camera}")
+def draw_status(frame, detection: Detection, debug: bool):
+    """Target coordinates, posture and (optionally) per-finger flags."""
+    if not detection.hand_found:
+        put_text(frame, "no hand detected", (10, 30), (0, 0, 255))
+        return
 
-    recognizer = GestureRecognizer(smoothing=not args.no_smooth)
+    sx, sy = detection.centroid.astype(int)
+    nx, ny = detection.target_norm
+    put_text(
+        frame, f"target: px=({sx},{sy})  norm=({nx:.2f},{ny:.2f})",
+        (10, 30), (0, 255, 0),
+    )
+    put_text(frame, f"posture: {detection.posture or '-'}", (10, 60), (255, 255, 0))
+
+    if debug:
+        flags = "  ".join(
+            f"{name}:{int(v)}" for name, v in detection.extended.items()
+        )
+        put_text(frame, flags, (10, 90), (200, 200, 200), scale=0.5, thickness=1)
+
+
+def run(camera: Camera, pipeline: DetectionPipeline, debug: bool):
+    """Show frames until the user presses 'q'."""
+    fps = FpsMeter()
+    smoothing_note = "" if pipeline.smoothing else "  (no smoothing)"
     banner, banner_until = None, 0.0
-    start_time = time.time()
-    fps, last_frame = 0.0, start_time
-    # MediaPipe needs strictly increasing timestamps; the wall clock can jump
-    # back and two frames can land on the same millisecond.
-    clock_start, last_ts = time.monotonic(), -1
 
-    while cap.isOpened():
-        ok, frame = cap.read()
-        if not ok:
-            print("Failed to read frame from camera.")
-            break
-
-        frame = cv2.flip(frame, 1)  # mirror for natural interaction
+    while True:
+        frame = camera.read()
         h, w = frame.shape[:2]
 
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-        timestamp_ms = max(int((time.monotonic() - clock_start) * 1000), last_ts + 1)
-        last_ts = timestamp_ms
+        detection = pipeline.process(frame)
+        draw_detection(frame, detection)
+        draw_status(frame, detection, debug)
 
-        result = detector.detect_for_video(mp_image, timestamp_ms)
+        if detection.event:
+            banner = f"{detection.event} -> SOFIA: {SOFIA_ACTIONS[detection.event]}"
+            banner_until = detection.timestamp + BANNER_SECONDS
+            print(banner)
 
-        if result.hand_landmarks:
-            landmarks = result.hand_landmarks[0]  # first detected hand
-
-            draw_hand(frame, landmarks, w, h)
-
-            now = time.time()
-            posture, event = recognizer.update(landmarks, now, w, h)
-
-            raw_c, smooth_c = recognizer.raw_centroid, recognizer.centroid
-            sx, sy = int(smooth_c[0]), int(smooth_c[1])
-
-            # Draw raw (small, red) vs smoothed (large, green) point
-            cv2.circle(frame, (int(raw_c[0]), int(raw_c[1])), 4, (0, 0, 255), -1)
-            cv2.circle(frame, (sx, sy), 10, (0, 255, 0), -1)
-
-            # Normalized coords (0-1) - useful later for panel mapping
-            nx, ny = sx / w, sy / h
-            cv2.putText(
-                frame,
-                f"target: px=({sx},{sy})  norm=({nx:.2f},{ny:.2f})",
-                (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (0, 255, 0),
-                2,
-            )
-
-            cv2.putText(
-                frame, f"posture: {posture or '-'}", (10, 60),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2,
-            )
-            if event:
-                banner = f"{event} -> SOFIA: {SOFIA_ACTIONS[event]}"
-                banner_until = now + BANNER_SECONDS
-                print(banner)
-
-            if args.debug:
-                flags = "  ".join(
-                    f"{name}:{int(v)}" for name, v in recognizer.extended.items()
-                )
-                cv2.putText(
-                    frame, flags, (10, 90),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1,
-                )
-        else:
-            recognizer.reset()  # also clears the smoothing filters
-            cv2.putText(
-                frame, "no hand detected", (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2,
-            )
-
-        now = time.time()
-        fps = 0.9 * fps + 0.1 / max(now - last_frame, 1e-6)
-        last_frame = now
-        cv2.putText(
-            frame, f"{fps:.0f} FPS" + ("  (no smoothing)" if args.no_smooth else ""),
-            (w - 230, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2,
+        put_text(
+            frame, f"{fps.tick():.0f} FPS{smoothing_note}", (w - 230, 30),
+            (255, 255, 255),
         )
+        if banner and time.monotonic() < banner_until:
+            put_text(frame, banner, (10, h - 20), (0, 200, 255), scale=0.8)
 
-        if banner and now < banner_until:
-            cv2.putText(
-                frame, banner, (10, h - 20),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 200, 255), 2,
-            )
-
-        cv2.imshow("SOFIA - Hand Tracking", frame)
+        cv2.imshow(WINDOW, frame)
         if cv2.waitKey(1) & 0xFF == ord("q"):
-            break
+            return
 
-    cap.release()
-    cv2.destroyAllWindows()
+
+def main():
+    args = parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+    try:
+        with (
+            Camera(args.camera) as camera,
+            DetectionPipeline(smoothing=not args.no_smooth) as pipeline,
+        ):
+            print(f"Using camera index {args.camera}")
+            run(camera, pipeline, args.debug)
+    except CameraError as exc:
+        raise SystemExit(exc)
+    finally:
+        cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":

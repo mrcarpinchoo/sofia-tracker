@@ -105,7 +105,8 @@ python analyze.py     # writes results/summary.md and results/confusion.png
 
 ## Files
 
-- `tracker.py`: main loop. Captures the camera, detects the hand and draws the overlay (raw and smoothed palm centroid, posture, FPS).
+- `tracker.py`: command-line front end. Shows the camera in an OpenCV window with the overlay (raw and smoothed palm centroid, posture, FPS).
+- `detection.py`: the detection pipeline, independent of any front end. Camera capture, MediaPipe hand landmarks plus gesture recognition (one frame in, one `Detection` out), the overlay drawing, and `DetectionWorker`, which runs it all on a background thread that can be started, paused, resumed and stopped (used by the GUI).
 - `gestures.py`: posture classification, smoothing filters and the gesture recognizer. The tuning thresholds are at the top of the file.
 - `evaluate.py`: guided test sessions that log one CSV row per trial.
 - `analyze.py`: turns the CSVs in `results/` into `summary.md` and `confusion.png`.
