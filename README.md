@@ -109,36 +109,14 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-### Experiments
-
-Run a guided session per user and lighting condition (`bright`, `normal`,
-`dim` or `backlight`). It asks for each gesture in random order, then
-records 20 s of idle movement to count false positives:
-
-```bash
-python evaluate.py --user U1 --light dim                # smoothing on
-python evaluate.py --user U1 --light dim --no-smooth    # baseline
-python evaluate.py --user U1 --light dim --trials 10    # more repetitions
-```
-
-Each session writes a CSV to `results/`. Then generate the tables and the
-confusion matrix:
-
-```bash
-python analyze.py     # writes results/summary.md and results/confusion.png
-```
-
 ## Files
 
 - `gui/`: the PySide6 GUI. `bridge.py` adapts `DetectionWorker` to Qt signals, `video_view.py` draws the frames and `main_window.py` holds the layout and controls. Run with `python -m gui`.
 - `tracker.py`: command-line front end. Shows the camera in an OpenCV window with the overlay (raw and smoothed palm centroid, posture, FPS).
 - `detection.py`: the detection pipeline, independent of any front end. Camera capture, MediaPipe hand landmarks plus gesture recognition (one frame in, one `Detection` out), the overlay drawing, and `DetectionWorker`, which runs it all on a background thread that can be started, paused, resumed and stopped (used by the GUI).
 - `gestures.py`: posture classification, smoothing filters and the gesture recognizer. The tuning thresholds are at the top of the file.
-- `evaluate.py`: guided test sessions that log one CSV row per trial.
-- `analyze.py`: turns the CSVs in `results/` into `summary.md` and `confusion.png`.
-- `results/`: experiment data (CSVs) and generated summaries.
 - `docs/JUSTIFICACION.md`: design justification (Spanish).
-- `docs/DETECCION_Y_EVALUACION.md`: detection rules, smoothing, evaluation protocol and results (Spanish).
+- `docs/DETECCION.md`: detection rules and smoothing (Spanish). The evaluation protocol, scripts and results live on the `evaluation` branch.
 - `docs/INTERFAZ.md`: GUI architecture, threading model, wireframe, controls and framework justification (Spanish).
 - `tests/`: pytest suite for the detection worker and the GUI.
 - `find_camera.py`: previews each camera index so you can find your webcam.

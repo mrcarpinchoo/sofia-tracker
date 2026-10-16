@@ -28,8 +28,8 @@ depende de ninguna interfaz, y la GUI no contiene lógica de detección.
 | `gui/main_window.py` | `MainWindow`: distribución, controles, panel de resultados y registro de eventos. |
 | `tracker.py` | Interfaz de línea de comandos (ventana de OpenCV), usa el mismo pipeline. |
 
-Como la GUI, `tracker.py` y `evaluate.py` usan el mismo `DetectionPipeline`,
-los resultados de la evaluación (U1) son válidos para lo que muestra la GUI.
+Como la GUI y `tracker.py` usan el mismo `DetectionPipeline`, ambos
+reconocen exactamente los mismos gestos.
 
 ### 1.2 Modelo de hilos
 

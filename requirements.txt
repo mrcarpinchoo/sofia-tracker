@@ -2,5 +2,4 @@
 # mediapipe also installs opencv-contrib-python, which provides cv2
 mediapipe==0.10.35
 numpy==2.5.2
-matplotlib==3.11.1
 PySide6==6.12.0

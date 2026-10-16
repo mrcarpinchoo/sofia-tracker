@@ -10,8 +10,8 @@ front end:
   DetectionWorker    runs Camera + DetectionPipeline on a background thread
                      that can be started, paused, resumed and stopped
 
-tracker.py (CLI) and evaluate.py drive Camera and DetectionPipeline from
-their own loop. The GUI uses DetectionWorker so that video processing never
+tracker.py (CLI) drives Camera and DetectionPipeline from its own loop.
+The GUI uses DetectionWorker so that video processing never
 blocks the interface.
 
 Note: mediapipe deprecated the old `mp.solutions.hands` API back in 2023,
