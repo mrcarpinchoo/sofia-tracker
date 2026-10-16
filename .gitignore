@@ -20,3 +20,6 @@ results/confusion.png
 .vscode/
 .idea/
 .DS_Store
+
+# pytest
+.pytest_cache/
