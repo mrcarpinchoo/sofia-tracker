@@ -109,9 +109,21 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
+### ESP32 link
+
+The PC talks to the SOFIA Maestro (ESP32) over Wi‑Fi using the protocol in
+`sofia-firmware/docs/PROTOCOL.md`. Connect the PC to the Maestro's Wi‑Fi
+network (`SOFIA-Maestro`), then check the link:
+
+```bash
+python -m comms ping                # 4 PINGs to 192.168.4.1:4210
+python -m comms ping --count 10
+```
+
 ## Files
 
 - `gui/`: the PySide6 GUI. `bridge.py` adapts `DetectionWorker` to Qt signals, `video_view.py` draws the frames and `main_window.py` holds the layout and controls. Run with `python -m gui`.
+- `comms/`: link to the ESP32 Maestro. `protocol.py` encodes and decodes frames; `python -m comms ping` checks the connection.
 - `tracker.py`: command-line front end. Shows the camera in an OpenCV window with the overlay (raw and smoothed palm centroid, posture, FPS).
 - `detection.py`: the detection pipeline, independent of any front end. Camera capture, MediaPipe hand landmarks plus gesture recognition (one frame in, one `Detection` out), the overlay drawing, and `DetectionWorker`, which runs it all on a background thread that can be started, paused, resumed and stopped (used by the GUI).
 - `gestures.py`: posture classification, smoothing filters and the gesture recognizer. The tuning thresholds are at the top of the file.
