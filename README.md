@@ -7,8 +7,9 @@ to a SOFIA motion.
 
 There are two front ends: a desktop GUI (PySide6) with start / pause /
 resume / stop controls, and a command-line tracker with an OpenCV window.
-At this stage, gestures are only shown on screen. They aren't sent to the
-simulation or the servos yet.
+The GUI can send the gestures and the hand's position to the SOFIA Maestro
+(the ESP32 in `sofia-firmware`), which moves the panel; see
+[ESP32 link](#esp32-link).
 
 ## Gestures
 
@@ -81,6 +82,7 @@ Run the GUI:
 python -m gui                     # default camera (index 0)
 python -m gui --camera 1          # a specific camera (also selectable in the window)
 python -m gui --no-smooth         # start with smoothing off
+python -m gui --maestro 192.168.4.1:4210   # Maestro address (this is the default)
 ```
 
 **Iniciar** opens the camera and starts detecting, **Detener** pauses
@@ -112,18 +114,48 @@ pytest
 ### ESP32 link
 
 The PC talks to the SOFIA Maestro (ESP32) over Wi‑Fi using the protocol in
-`sofia-firmware/docs/PROTOCOL.md`. Connect the PC to the Maestro's Wi‑Fi
-network (`SOFIA-Maestro`), then check the link:
+`sofia-firmware/docs/PROTOCOL.md`. The tracker sends *what* to do (a
+gesture, the hand's position); the Maestro turns it into the 32 joint
+angles. Connect the PC to the Maestro's Wi‑Fi network (`SOFIA-Maestro`,
+password `sofia-maestro`).
+
+**From the GUI**, in the **Maestro (ESP32)** group:
+
+1. Tick **Enviar gestos y mano al Maestro**. The group shows the link, who
+   controls SOFIA, the Maestro's mode and the latency (95th percentile, and
+   the share of commands answered within 500 ms).
+2. Press **Armar** to take control and power the servos. Only one client
+   (this GUI, another program or a browser running `sofia-web`) controls
+   SOFIA at a time.
+3. Press **Iniciar**. Each recognised gesture plays its motion, and between
+   gestures the panel follows the hand. When the hand leaves the image, or
+   detection pauses or stops, the panel holds its pose after 0.5 s.
+4. **STOP** holds the pose and releases control, whoever has it. Unticking
+   the box or closing the window also sends STOP if this GUI has control.
+
+Rejected commands (for example a gesture while another is still playing)
+appear in the status bar.
+
+**From the terminal**, for tests and calibration:
 
 ```bash
 python -m comms ping                # 4 PINGs to 192.168.4.1:4210
-python -m comms ping --count 10
+python -m comms status              # state, controller and the 32 joint angles
+python -m comms arm                 # take control, power the servos
+python -m comms gesture V           # INDEX, V, PALM, SWIPE_LEFT, SWIPE_RIGHT, GRAB
+python -m comms target 0.8 0.5      # point at a camera point (0-1) for 1 s
+python -m comms angles 10 -5 --module 3   # joint angles in degrees, for calibration
+python -m comms stop                # hold the pose, release control
+python -m comms off                 # PWM off
 ```
+
+Every run uses local UDP port 4211, so consecutive runs count as the same
+client. `gesture`, `target` and `angles` send ARM first.
 
 ## Files
 
-- `gui/`: the PySide6 GUI. `bridge.py` adapts `DetectionWorker` to Qt signals, `video_view.py` draws the frames and `main_window.py` holds the layout and controls. Run with `python -m gui`.
-- `comms/`: link to the ESP32 Maestro. `protocol.py` encodes and decodes frames; `python -m comms ping` checks the connection.
+- `gui/`: the PySide6 GUI. `bridge.py` adapts `DetectionWorker` to Qt signals, `maestro.py` does the same for `MaestroClient`, `video_view.py` draws the frames and `main_window.py` holds the layout and controls. Run with `python -m gui`.
+- `comms/`: link to the ESP32 Maestro. `protocol.py` encodes and decodes frames and payloads, `link.py` sends one command and waits for its answer, `maestro.py` (`MaestroClient`) runs the link on a background thread for the GUI, and `python -m comms` is the command-line client.
 - `tracker.py`: command-line front end. Shows the camera in an OpenCV window with the overlay (raw and smoothed palm centroid, posture, FPS).
 - `detection.py`: the detection pipeline, independent of any front end. Camera capture, MediaPipe hand landmarks plus gesture recognition (one frame in, one `Detection` out), the overlay drawing, and `DetectionWorker`, which runs it all on a background thread that can be started, paused, resumed and stopped (used by the GUI).
 - `gestures.py`: posture classification, smoothing filters and the gesture recognizer. The tuning thresholds are at the top of the file.

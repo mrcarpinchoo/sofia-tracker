@@ -31,11 +31,17 @@ class FrameType(IntEnum):
 
 
 class Command(IntEnum):
+    # Link and diagnostics
     PING = 0x01
-    # Reserved for later stages
     GET_STATUS = 0x02
+    GET_ANGLES = 0x03
+    # SOFIA motion
     GESTURE = 0x10
     SET_TARGET = 0x11
+    ARM = 0x12
+    STOP = 0x13
+    OFF = 0x14
+    SET_ANGLES = 0x15
 
 
 class ErrorCode(IntEnum):
@@ -45,6 +51,35 @@ class ErrorCode(IntEnum):
     UNSUPPORTED_VERSION = 0x04
     BUSY = 0x05
     INTERNAL = 0x06
+    NOT_CONTROLLER = 0x07
+
+
+class Gesture(IntEnum):
+    """GESTURE IDs, named as gestures.py reports them."""
+    INDEX = 1
+    V = 2
+    PALM = 3
+    SWIPE_LEFT = 4
+    SWIPE_RIGHT = 5
+    GRAB = 6
+
+
+class Mode(IntEnum):
+    OFF = 0
+    HOLD = 1
+    TARGET = 2
+    GESTURE = 3
+    MANUAL = 4
+
+
+class Transport(IntEnum):
+    NONE = 0
+    UDP = 1
+    WEBSOCKET = 2
+
+
+MODULES = 16
+LIMIT_DEG = 30.0
 
 
 class DecodeError(ValueError):
@@ -109,3 +144,74 @@ def parse_ping_ack(payload: bytes) -> PingInfo:
         raise DecodeError(f"PING ACK payload must be {_PING_ACK.size} bytes")
     major, minor, patch, uptime_ms = _PING_ACK.unpack(payload)
     return PingInfo(f"{major}.{minor}.{patch}", uptime_ms)
+
+
+# GET_STATUS ------------------------------------------------------------------
+_STATUS_ACK = struct.Struct("<BBBBBBBHHH")
+
+
+@dataclass(frozen=True)
+class Status:
+    healthy: bool          # PWM boards answer
+    armed: bool
+    simulated: bool        # firmware built without servos
+    mode: Mode
+    gesture: Gesture | None
+    controller: Transport  # transport of the client in control
+    is_controller: bool    # the client asking is in control
+    limit_deg: int
+    powered: int           # servos powered since ARM (0-32)
+    watchdog_holds: int
+    nacks: int
+    discarded: int
+
+
+def parse_status_ack(payload: bytes) -> Status:
+    if len(payload) != _STATUS_ACK.size:
+        raise DecodeError(f"GET_STATUS ACK payload must be {_STATUS_ACK.size} bytes")
+    (flags, mode, gesture, controller, you, limit, powered,
+     holds, nacks, discarded) = _STATUS_ACK.unpack(payload)
+    return Status(
+        healthy=bool(flags & 1), armed=bool(flags & 2), simulated=bool(flags & 4),
+        mode=Mode(mode), gesture=Gesture(gesture) if gesture else None,
+        controller=Transport(controller), is_controller=bool(you),
+        limit_deg=limit, powered=powered,
+        watchdog_holds=holds, nacks=nacks, discarded=discarded,
+    )
+
+
+# GESTURE / SET_TARGET ----------------------------------------------------------
+def gesture_payload(gesture: Gesture) -> bytes:
+    return bytes([Gesture(gesture)])
+
+
+def target_payload(x: float, y: float) -> bytes:
+    """Camera point, 0-1 (image mirrored, y down), as two uint16 0-10000."""
+    def scaled(v: float) -> int:
+        return round(min(max(v, 0.0), 1.0) * 10000)
+    return struct.pack("<HH", scaled(x), scaled(y))
+
+
+# GET_ANGLES / SET_ANGLES -------------------------------------------------------
+# 16 modules x (q1, q2), int16 hundredths of a degree.
+_ANGLES = struct.Struct(f"<{2 * MODULES}h")
+
+
+def angles_payload(angles) -> bytes:
+    """`angles`: 16 (q1, q2) pairs in degrees, each within ±LIMIT_DEG."""
+    values = []
+    for q1, q2 in angles:
+        for q in (q1, q2):
+            if not -LIMIT_DEG <= q <= LIMIT_DEG:
+                raise ValueError(f"angle {q}° outside ±{LIMIT_DEG:g}°")
+            values.append(round(q * 100))
+    if len(values) != 2 * MODULES:
+        raise ValueError(f"need {MODULES} (q1, q2) pairs")
+    return _ANGLES.pack(*values)
+
+
+def parse_angles(payload: bytes) -> list[tuple[float, float]]:
+    if len(payload) != _ANGLES.size:
+        raise DecodeError(f"angles payload must be {_ANGLES.size} bytes")
+    values = _ANGLES.unpack(payload)
+    return [(values[2 * i] / 100, values[2 * i + 1] / 100) for i in range(MODULES)]

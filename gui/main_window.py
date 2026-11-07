@@ -20,8 +20,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from comms.maestro import LinkInfo
+from comms.protocol import Mode, Transport
 from detection import FrameResult, WorkerState
 from gui.bridge import DetectionBridge
+from gui.maestro import MaestroBridge
 from gui.video_view import VideoView
 
 # Spanish UI text for each SOFIA gesture (keys match gestures.SOFIA_ACTIONS)
@@ -40,16 +43,38 @@ STATE_LABELS = {
     WorkerState.PAUSED: ("En pausa", "#d08a00"),
 }
 
+MODE_LABELS = {
+    Mode.OFF: "apagado",
+    Mode.HOLD: "quieto",
+    Mode.TARGET: "siguiendo la mano",
+    Mode.GESTURE: "gesto",
+    Mode.MANUAL: "ángulos manuales",
+}
+
 MAX_CAMERA_INDEX = 10
 MAX_LOG_ENTRIES = 200
 EMPTY = "—"
 
 
+def controller_text(info: LinkInfo) -> str:
+    status = info.status
+    if status is None:
+        return EMPTY
+    if status.is_controller:
+        return "este programa"
+    if status.controller is Transport.UDP:
+        return "otro programa (UDP)"
+    if status.controller is Transport.WEBSOCKET:
+        return "un navegador"
+    return "nadie"
+
+
 class MainWindow(QMainWindow):
-    def __init__(self, bridge: DetectionBridge):
+    def __init__(self, bridge: DetectionBridge, maestro: MaestroBridge | None = None):
         super().__init__()
         self.setWindowTitle("SOFIA — Control")
         self._bridge = bridge
+        self._maestro = maestro or MaestroBridge(parent=self)
         # Set between Finalizar and the worker reporting STOPPED
         self._stopping = False
 
@@ -110,8 +135,45 @@ class MainWindow(QMainWindow):
         panel = QVBoxLayout()
         panel.addWidget(detection_group)
         panel.addWidget(self.settings_group)
+        panel.addWidget(self._build_maestro_group())
         panel.addStretch()
         return panel
+
+    def _build_maestro_group(self) -> QGroupBox:
+        self.maestro_check = QCheckBox("Enviar gestos y mano al Maestro")
+        self.maestro_check.setToolTip(
+            f"Conecta con el Maestro en {self._maestro.host}:{self._maestro.port} (UDP). "
+            "La PC debe estar en la red Wi‑Fi SOFIA-Maestro."
+        )
+        self.link_label = QLabel(EMPTY)
+        self.control_label = QLabel(EMPTY)
+        self.mode_label = QLabel(EMPTY)
+        self.latency_label = QLabel(EMPTY)
+        self.arm_button = QPushButton("Armar")
+        self.arm_button.setToolTip("Toma el control y enciende los servos.")
+        self.maestro_stop_button = QPushButton("STOP")
+        self.maestro_stop_button.setToolTip(
+            "Detiene el panal y libera el control, lo tenga quien lo tenga."
+        )
+        self.maestro_stop_button.setStyleSheet("font-weight: bold; color: #c0392b;")
+        for button in (self.arm_button, self.maestro_stop_button):
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.arm_button)
+        buttons.addWidget(self.maestro_stop_button)
+
+        form = QFormLayout()
+        form.addRow(self.maestro_check)
+        form.addRow("Enlace:", self.link_label)
+        form.addRow("Control:", self.control_label)
+        form.addRow("Modo:", self.mode_label)
+        form.addRow("Latencia:", self.latency_label)
+        form.addRow(buttons)
+        group = QGroupBox("Maestro (ESP32)")
+        group.setLayout(form)
+        self._refresh_maestro(None)
+        return group
 
     def _build_controls(self) -> QHBoxLayout:
         icon = self.style().standardIcon
@@ -156,6 +218,12 @@ class MainWindow(QMainWindow):
         self._bridge.state_changed.connect(self._on_state_changed)
         self._bridge.gesture_detected.connect(self._log_gesture)
         self._bridge.error.connect(self._show_error)
+
+        self.maestro_check.toggled.connect(self._toggle_maestro)
+        self.arm_button.clicked.connect(self._maestro.arm)
+        self.maestro_stop_button.clicked.connect(self._maestro.stop)
+        self._maestro.info_changed.connect(self._refresh_maestro)
+        self._maestro.rejected.connect(self._show_rejection)
 
     # Controls --------------------------------------------------------------
     @Slot()
@@ -204,6 +272,8 @@ class MainWindow(QMainWindow):
 
         running = state is WorkerState.RUNNING and not self._stopping
         paused = state is WorkerState.PAUSED and not self._stopping
+        if not running:
+            self._maestro.clear_target()   # no detection, no hand to follow
         self.start_button.setEnabled(state is WorkerState.STOPPED)
         self.pause_button.setEnabled(running)
         self.resume_button.setEnabled(paused)
@@ -221,6 +291,7 @@ class MainWindow(QMainWindow):
 
         detection = result.detection
         if detection is None:  # paused: video only
+            self._maestro.clear_target()
             self.posture_label.setText(EMPTY)
             self.target_label.setText("detección en pausa")
             self.perf_label.setText(f"{result.fps:.0f} FPS")
@@ -228,6 +299,11 @@ class MainWindow(QMainWindow):
 
         self.posture_label.setText(detection.posture or EMPTY)
         target = detection.target_norm
+        # The Maestro holds the pose 0.5 s after the hand is lost.
+        if target:
+            self._maestro.set_target(*target)
+        else:
+            self._maestro.clear_target()
         self.target_label.setText(
             f"({target[0]:.2f}, {target[1]:.2f})" if target else "sin mano"
         )
@@ -235,6 +311,7 @@ class MainWindow(QMainWindow):
 
     @Slot(str, float)
     def _log_gesture(self, event: str, timestamp: float):
+        self._maestro.gesture(event)
         action = ACTION_LABELS.get(event, EMPTY)
         self.gesture_label.setText(event)
         self.action_label.setText(action)
@@ -253,7 +330,50 @@ class MainWindow(QMainWindow):
         for label in (self.posture_label, self.target_label, self.perf_label):
             label.setText(EMPTY)
 
+    # Maestro ---------------------------------------------------------------
+    @Slot(bool)
+    def _toggle_maestro(self, enabled: bool):
+        if enabled:
+            self._maestro.open()
+            self.link_label.setText("conectando…")
+        else:
+            self._maestro.close()
+            self._refresh_maestro(None)
+
+    @Slot(object)
+    def _refresh_maestro(self, info: LinkInfo | None):
+        is_open = self._maestro.is_open
+        self.arm_button.setEnabled(is_open)
+        self.maestro_stop_button.setEnabled(is_open)
+        if info is None or not is_open:
+            self.link_label.setText("desconectado" if not is_open else "conectando…")
+            for label in (self.control_label, self.mode_label, self.latency_label):
+                label.setText(EMPTY)
+            return
+
+        status = info.status
+        if not info.online or status is None:
+            self.link_label.setText('<span style="color:#c0392b">sin respuesta</span>')
+        elif status.simulated:
+            self.link_label.setText("en línea · servos simulados")
+        elif not status.healthy:
+            self.link_label.setText('en línea · <span style="color:#d08a00">placas PWM sin respuesta</span>')
+        else:
+            self.link_label.setText(f"en línea · {status.powered}/32 servos")
+        self.control_label.setText(controller_text(info))
+        if status:
+            mode = MODE_LABELS[status.mode]
+            self.mode_label.setText(f"{mode} ({status.gesture.name})" if status.gesture else mode)
+        if info.p95_ms is not None and info.within_500 is not None:
+            p95 = f"{info.p95_ms:.0f} ms" if info.p95_ms != float("inf") else "> 800 ms"
+            self.latency_label.setText(f"p95 {p95} · {info.within_500:.1%} < 500 ms")
+
+    @Slot(str, str)
+    def _show_rejection(self, command: str, reason: str):
+        self.statusBar().showMessage(f"Maestro rechazó {command}: {reason}", 5_000)
+
     # Qt events -------------------------------------------------------------
     def closeEvent(self, event):
         self._bridge.shutdown()  # releases the camera before exiting
+        self._maestro.close()    # sends STOP if this program controls SOFIA
         super().closeEvent(event)

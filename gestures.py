@@ -15,6 +15,9 @@ finger classification), an EMA over the palm centroid (for the motion
 rules) and a majority vote over the last frames (for the posture label).
 All distances are measured in pixels and compared against the palm width,
 so thresholds don't depend on how far the hand is from the camera.
+
+sofia-web/src/perception/handRecognizer.ts is a line-for-line copy, so the
+web app recognises the same gestures: change both together.
 """
 
 from collections import Counter, deque
