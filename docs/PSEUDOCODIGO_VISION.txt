@@ -1,0 +1,36 @@
+SOFIA - PSEUDOCÓDIGO DEL MÓDULO DE VISIÓN
+
+INICIO
+    cargar modelo MediaPipe Hand Landmarker (modo video, 1 mano)
+    abrir cámara
+
+    MIENTRAS el sistema esté activo HACER
+        cuadro ← leer cámara y reflejar horizontalmente
+        mano ← detectar 21 landmarks con MediaPipe
+
+        SI no hay mano ENTONCES
+            reiniciar filtros e historial
+            CONTINUAR
+        FIN SI
+
+        suavizar landmarks con EMA
+        dedos ← determinar qué dedos están extendidos
+        postura ← clasificar dedos en PALM, FIST, INDEX o V
+        postura ← voto por mayoría de los últimos 5 cuadros
+
+        centroide ← centro de la palma, suavizado con EMA
+        guardar (tiempo, centroide, postura) en historial de 1 s
+
+        SI hay un gesto en espera (cooldown) ENTONCES CONTINUAR
+
+        SI la mano se desplazó rápido en horizontal ENTONCES
+            gesto ← SWIPE_LEFT o SWIPE_RIGHT
+        SINO SI pasó de palma abierta a puño en poco tiempo ENTONCES
+            gesto ← GRAB
+        SINO SI la postura (INDEX, V o PALM) se sostiene quieta 0.5 s ENTONCES
+            gesto ← esa postura
+        FIN SI
+
+        reportar postura, gesto y centroide normalizado
+    FIN MIENTRAS
+FIN
