@@ -26,6 +26,7 @@ depende de ninguna interfaz, y la GUI no contiene lógica de detección.
 | `gui/bridge.py` | `DetectionBridge`: adapta el `DetectionWorker` a señales de Qt. |
 | `gui/video_view.py` | `VideoView`: dibuja el último cuadro escalado a la ventana. |
 | `gui/main_window.py` | `MainWindow`: distribución, controles, panel de resultados y registro de eventos. |
+| `events.py` | `Event` y `EventLog`: el registro CSV de eventos y errores de cada sesión. |
 | `tracker.py` | Interfaz de línea de comandos (ventana de OpenCV), usa el mismo pipeline. |
 
 Como la GUI y `tracker.py` usan el mismo `DetectionPipeline`, ambos
@@ -122,8 +123,12 @@ stateDiagram-v2
     EnPausa --> Detectando: Reanudar / Espacio
     Detectando --> Detenido: Finalizar
     EnPausa --> Detenido: Finalizar
-    Detectando --> Detenido: error de cámara
-    EnPausa --> Detenido: error de cámara
+    Detenido --> Detenido: la cámara no abre
+    Detectando --> Reconectando: cámara perdida
+    EnPausa --> Reconectando: cámara perdida
+    Reconectando --> Detectando: cámara recuperada
+    Reconectando --> EnPausa: cámara recuperada (estaba en pausa)
+    Reconectando --> Detenido: Finalizar
 ```
 
 | Control | Efecto sobre el hilo de detección | Habilitado en |
@@ -131,7 +136,10 @@ stateDiagram-v2
 | **Iniciar** | Crea el hilo, abre la cámara y carga el modelo con la configuración elegida. | Detenido |
 | **Detener** | El hilo sigue capturando y mostrando video, pero deja de ejecutar la detección. | Detectando |
 | **Reanudar** | El hilo vuelve a detectar. Antes reinicia el historial de gestos y los filtros. | En pausa |
-| **Finalizar** | El hilo termina y libera la cámara. | Detectando, En pausa |
+| **Finalizar** | El hilo termina y libera la cámara. | Detectando, En pausa, Reconectando |
+
+En **Reconectando** el hilo intenta reabrir la cámara cada 2 s; el detalle
+de este y los demás errores está en `MANEJO_DE_ERRORES.md`.
 
 La tecla **Espacio** alterna entre Detener y Reanudar. Los botones que no
 aplican al estado actual se deshabilitan, y el worker además ignora un

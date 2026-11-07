@@ -23,7 +23,8 @@ class DetectionBridge(QObject):
 
     frame_ready = Signal(object)            # FrameResult
     state_changed = Signal(object)          # WorkerState
-    error = Signal(str)
+    error = Signal(str)                     # detection stopped on an error
+    event = Signal(object)                  # events.Event (camera lost, recovered...)
     gesture_detected = Signal(str, float)   # event, time.monotonic() timestamp
 
     _frame_available = Signal()             # internal: worker -> UI thread
@@ -54,6 +55,7 @@ class DetectionBridge(QObject):
             smoothing=self.smoothing,
             on_state_change=self.state_changed.emit,
             on_error=lambda exc: self.error.emit(str(exc)),
+            on_event=self.event.emit,
         )
         self._worker.start()
 

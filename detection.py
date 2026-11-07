@@ -8,7 +8,8 @@ front end:
   DetectionPipeline  one frame in, one Detection out (MediaPipe + gestures)
   draw_detection     draws the hand skeleton and palm centroid on a frame
   DetectionWorker    runs Camera + DetectionPipeline on a background thread
-                     that can be started, paused, resumed and stopped
+                     that can be started, paused, resumed and stopped, and
+                     reopens the camera if it stops delivering frames
 
 tracker.py (CLI) drives Camera and DetectionPipeline from its own loop.
 The GUI uses DetectionWorker so that video processing never
@@ -34,6 +35,7 @@ import numpy as np
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
 
+from events import Event, Level
 from gestures import GestureRecognizer
 
 log = logging.getLogger(__name__)
@@ -45,6 +47,10 @@ CAM_INDEX = 0
 MAX_HANDS = 1
 DETECTION_CONF = 0.6
 TRACKING_CONF = 0.6
+
+CAMERA_READ_FAILURES = 5   # consecutive failed reads before the camera counts as lost
+CAMERA_READ_RETRY_S = 0.05 # wait between those reads
+CAMERA_RETRY_S = 2.0       # wait between attempts to reopen a lost camera
 
 MODEL_PATH = Path(__file__).with_name("hand_landmarker.task")
 MODEL_URL = (
@@ -269,6 +275,7 @@ class WorkerState(enum.Enum):
     STOPPED = "stopped"
     RUNNING = "running"
     PAUSED = "paused"
+    RECONNECTING = "reconnecting"   # camera lost, trying to reopen it
 
 
 @dataclass(frozen=True, eq=False)
@@ -289,6 +296,12 @@ class DetectionWorker:
       resume()  detect again; gesture history starts fresh
       stop()    end the thread and release the camera
 
+    If the camera stops delivering frames while running (unplugged, taken
+    by another program), the worker reports RECONNECTING, tries to reopen
+    it every CAMERA_RETRY_S and then goes back to RUNNING or PAUSED with a
+    fresh gesture history. A camera that can't be opened at start() is an
+    error instead: the worker reports it and stops.
+
     A control that doesn't apply to the current state (e.g. pause() while
     stopped) is ignored, so a GUI can wire buttons straight to them.
 
@@ -306,6 +319,7 @@ class DetectionWorker:
         annotate: bool = True,
         on_state_change: Callable[[WorkerState], None] | None = None,
         on_error: Callable[[Exception], None] | None = None,
+        on_event: Callable[[Event], None] | None = None,
     ):
         self.camera_index = camera_index
         self.smoothing = smoothing
@@ -313,6 +327,7 @@ class DetectionWorker:
         self._on_frame = on_frame
         self._on_state_change = on_state_change
         self._on_error = on_error
+        self._on_event = on_event
 
         # Reentrant so a state callback can read `state` while the worker
         # holds the lock to report STOPPED.
@@ -321,6 +336,7 @@ class DetectionWorker:
         self._stop_requested = threading.Event()
         self._thread: threading.Thread | None = None
         self._reported_state: WorkerState | None = None  # worker thread only
+        self._camera: Camera | None = None                # worker thread only
 
     @property
     def state(self) -> WorkerState:
@@ -366,31 +382,60 @@ class DetectionWorker:
         if self._on_state_change:
             self._on_state_change(state)
 
+    def _emit(self, event: Event):
+        if self._on_event:
+            self._on_event(event)
+
     def _run(self):
         self._reported_state = None
         try:
             self._report(self.state)
-            with (
-                Camera(self.camera_index) as camera,
-                DetectionPipeline(smoothing=self.smoothing) as pipeline,
-            ):
-                self._loop(camera, pipeline)
+            self._camera = Camera(self.camera_index)
+            with DetectionPipeline(smoothing=self.smoothing) as pipeline:
+                self._loop(pipeline)
         except Exception as exc:
             log.exception("Detection worker stopped on error")
+            camera_error = isinstance(exc, CameraError)
+            self._emit(Event(
+                Level.ERROR, "camara",
+                "CAMARA_NO_DISPONIBLE" if camera_error else "ERROR_DETECCION",
+                f"{type(exc).__name__}: {exc}",
+                "detección detenida y cámara liberada; revisar "
+                + ("el índice o la conexión de la cámara" if camera_error else "el detalle")
+                + " y pulsar Iniciar",
+            ))
             if self._on_error:
                 self._on_error(exc)
         finally:
+            if self._camera:
+                self._camera.close()
+                self._camera = None
             # Report under the lock so that a start() right after can't
             # deliver its RUNNING before this STOPPED.
             with self._lock:
                 self._state = WorkerState.STOPPED
                 self._report(WorkerState.STOPPED)
 
-    def _loop(self, camera: Camera, pipeline: DetectionPipeline):
+    def _loop(self, pipeline: DetectionPipeline):
         fps = FpsMeter()
         was_paused = False
+        failures = 0
         while not self._stop_requested.is_set():
-            frame = camera.read()
+            try:
+                frame = self._camera.read()
+            except CameraError as exc:
+                failures += 1
+                if failures < CAMERA_READ_FAILURES:
+                    self._stop_requested.wait(CAMERA_READ_RETRY_S)
+                    continue
+                if not self._reconnect(exc):
+                    return   # stop() while reconnecting
+                # The hand moved while the camera was gone
+                pipeline.reset()
+                fps = FpsMeter()
+                failures = 0
+                continue
+            failures = 0
             state = self.state
             self._report(state)
 
@@ -407,3 +452,47 @@ class DetectionWorker:
             was_paused = paused
 
             self._on_frame(FrameResult(frame, detection, fps.tick()))
+
+    def _reconnect(self, cause: CameraError) -> bool:
+        """Reopen the camera until it delivers a frame again.
+
+        Returns False if stop() was called first.
+        """
+        with self._lock:
+            resume_state = self._state      # RUNNING or PAUSED
+            self._state = WorkerState.RECONNECTING
+        self._report(WorkerState.RECONNECTING)
+        self._camera.close()
+        self._camera = None
+        log.warning("Camera lost (%s); reopening every %g s", cause, CAMERA_RETRY_S)
+        self._emit(Event(
+            Level.ERROR, "camara", "CAMARA_PERDIDA",
+            f"{cause} ({CAMERA_READ_FAILURES} lecturas fallidas seguidas)",
+            f"se intenta reabrir la cámara {self.camera_index} cada {CAMERA_RETRY_S:g} s",
+        ))
+
+        lost_at = time.monotonic()
+        attempts = 0
+        while not self._stop_requested.wait(CAMERA_RETRY_S):
+            attempts += 1
+            try:
+                camera = Camera(self.camera_index)
+            except CameraError:
+                continue
+            try:
+                camera.read()
+            except CameraError:
+                camera.close()
+                continue
+            self._camera = camera
+            with self._lock:
+                self._state = resume_state
+            log.info("Camera %d reopened", self.camera_index)
+            self._emit(Event(
+                Level.INFO, "camara", "CAMARA_RECUPERADA",
+                f"cámara {self.camera_index} reabierta tras "
+                f"{time.monotonic() - lost_at:.1f} s ({attempts} intentos)",
+                "se reanuda la detección con el historial de gestos reiniciado",
+            ))
+            return True
+        return False

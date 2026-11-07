@@ -1,8 +1,13 @@
-"""Main window: live video, detection results, controls and event log."""
+"""Main window: live video, detection results, controls and event log.
+
+Every event (gestures, commands, errors and recoveries) goes to the "Eventos"
+list and, with the program's state at that moment, to the session's CSV log
+(events.EventLog).
+"""
 
 from datetime import datetime
 
-from PySide6.QtCore import Qt, Slot
+from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -23,6 +28,7 @@ from PySide6.QtWidgets import (
 from comms.maestro import LinkInfo
 from comms.protocol import Mode, Transport
 from detection import FrameResult, WorkerState
+from events import Event, EventLog, Level
 from gui.bridge import DetectionBridge
 from gui.maestro import MaestroBridge
 from gui.video_view import VideoView
@@ -41,7 +47,12 @@ STATE_LABELS = {
     WorkerState.STOPPED: ("Detenido", "#888888"),
     WorkerState.RUNNING: ("Detectando", "#2e9d4f"),
     WorkerState.PAUSED: ("En pausa", "#d08a00"),
+    WorkerState.RECONNECTING: ("Reconectando cámara…", "#c0392b"),
 }
+
+LEVEL_MARKS = {Level.INFO: "·", Level.WARNING: "⚠", Level.ERROR: "✖"}
+# Shown in the log file only: the gesture line already says it
+QUIET_EVENTS = {"COMANDO_ACEPTADO", "GESTO_DETECTADO"}
 
 MODE_LABELS = {
     Mode.OFF: "apagado",
@@ -70,17 +81,26 @@ def controller_text(info: LinkInfo) -> str:
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, bridge: DetectionBridge, maestro: MaestroBridge | None = None):
+    _event_from_thread = Signal(object)   # see record_from_any_thread
+
+    def __init__(self, bridge: DetectionBridge, maestro: MaestroBridge | None = None,
+                 event_log: EventLog | None = None):
         super().__init__()
         self.setWindowTitle("SOFIA — Control")
         self._bridge = bridge
         self._maestro = maestro or MaestroBridge(parent=self)
+        self._event_log = event_log or EventLog(None)
+        self._link_info: LinkInfo | None = None
         # Set between Finalizar and the worker reporting STOPPED
         self._stopping = False
 
         self._build_ui()
         self._connect_signals()
         self._refresh_state()
+
+        log_path = self._event_log.path
+        self.record(Event(Level.INFO, "gui", "SESION_INICIADA",
+                          f"registro en {log_path}" if log_path else "sin archivo de registro"))
 
     # Layout ----------------------------------------------------------------
     def _build_ui(self):
@@ -204,6 +224,8 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout()
         layout.addWidget(self.log_list)
         group = QGroupBox("Eventos")
+        if self._event_log.path:
+            group.setToolTip(f"También se guardan en {self._event_log.path}")
         group.setLayout(layout)
         return group
 
@@ -218,12 +240,14 @@ class MainWindow(QMainWindow):
         self._bridge.state_changed.connect(self._on_state_changed)
         self._bridge.gesture_detected.connect(self._log_gesture)
         self._bridge.error.connect(self._show_error)
+        self._bridge.event.connect(self.record)
 
         self.maestro_check.toggled.connect(self._toggle_maestro)
         self.arm_button.clicked.connect(self._maestro.arm)
         self.maestro_stop_button.clicked.connect(self._maestro.stop)
         self._maestro.info_changed.connect(self._refresh_maestro)
-        self._maestro.rejected.connect(self._show_rejection)
+        self._maestro.event.connect(self.record)
+        self._event_from_thread.connect(self.record)
 
     # Controls --------------------------------------------------------------
     @Slot()
@@ -232,6 +256,9 @@ class MainWindow(QMainWindow):
         self._bridge.smoothing = self.smoothing_check.isChecked()
         self._bridge.start()
         self._refresh_state()
+        self.record(Event(Level.INFO, "gui", "DETECCION_INICIADA",
+                          f"cámara {self._bridge.camera_index}, suavizado "
+                          f"{'sí' if self._bridge.smoothing else 'no'}"))
 
     @Slot()
     def _pause(self):
@@ -255,6 +282,7 @@ class MainWindow(QMainWindow):
         self._stopping = True
         self._bridge.stop()
         self._refresh_state()
+        self.record(Event(Level.INFO, "gui", "DETECCION_FINALIZADA", "por el usuario"))
 
     # Bridge signals --------------------------------------------------------
     @Slot(object)
@@ -272,12 +300,19 @@ class MainWindow(QMainWindow):
 
         running = state is WorkerState.RUNNING and not self._stopping
         paused = state is WorkerState.PAUSED and not self._stopping
+        reconnecting = state is WorkerState.RECONNECTING and not self._stopping
+        if reconnecting:
+            self.video.placeholder = "Cámara perdida. Reintentando…"
+            self.video.clear()
+            self._clear_detection()
+        else:
+            self.video.placeholder = "Cámara detenida. Pulsa «Iniciar»."
         if not running:
             self._maestro.clear_target()   # no detection, no hand to follow
         self.start_button.setEnabled(state is WorkerState.STOPPED)
         self.pause_button.setEnabled(running)
         self.resume_button.setEnabled(paused)
-        self.stop_button.setEnabled(running or paused)
+        self.stop_button.setEnabled(running or paused or reconnecting)
         self.settings_group.setEnabled(state is WorkerState.STOPPED)
 
         text, color = STATE_LABELS[state]
@@ -315,15 +350,54 @@ class MainWindow(QMainWindow):
         action = ACTION_LABELS.get(event, EMPTY)
         self.gesture_label.setText(event)
         self.action_label.setText(action)
+        self._add_log_line(f"{event} → {action}")
+        sent = "se envía al Maestro" if self._maestro.is_open else "Maestro no conectado"
+        self.record(Event(Level.INFO, "camara", "GESTO_DETECTADO", event, sent))
 
+    def _add_log_line(self, text: str):
         clock = datetime.now().strftime("%H:%M:%S")
-        self.log_list.insertItem(0, f"{clock}  {event} → {action}")
+        self.log_list.insertItem(0, f"{clock}  {text}")
         while self.log_list.count() > MAX_LOG_ENTRIES:
             self.log_list.takeItem(self.log_list.count() - 1)
 
+    @Slot(object)
+    def record(self, event: Event):
+        """Log an event to the file (with the current state) and the window."""
+        self._event_log.record(event, self._context())
+        if event.name in QUIET_EVENTS:
+            return
+        self._add_log_line(f"{LEVEL_MARKS[event.level]} {event}")
+        if event.level is not Level.INFO:
+            self.statusBar().showMessage(f"{event.name}: {event.detail}", 8_000)
+
+    def record_from_any_thread(self, event: Event):
+        """record(), queued to the UI thread when called from another one."""
+        self._event_from_thread.emit(event)
+
+    def _context(self) -> str:
+        """The conditions an event happened in, for the log file."""
+        parts = [
+            f"deteccion={self._bridge.state.value}",
+            f"camara={self._bridge.camera_index}",
+            f"suavizado={'si' if self._bridge.smoothing else 'no'}",
+        ]
+        info = self._link_info
+        if not self._maestro.is_open:
+            parts.append("maestro=desconectado")
+        elif info is None:
+            parts.append("maestro=conectando")
+        else:
+            parts.append(f"maestro={'en_linea' if info.online else 'sin_respuesta'}")
+            if info.status:
+                parts.append(f"control={controller_text(info)}")
+                parts.append(f"modo={info.status.mode.name}")
+            if info.p95_ms is not None and info.p95_ms != float("inf"):
+                parts.append(f"p95={info.p95_ms:.0f}ms")
+        return "; ".join(parts)
+
     @Slot(str)
     def _show_error(self, message: str):
-        self.statusBar().showMessage(f"Error: {message}", 10_000)
+        # The worker already reported it as an event
         QMessageBox.warning(self, "Error de detección", message)
 
     def _clear_detection(self):
@@ -336,13 +410,17 @@ class MainWindow(QMainWindow):
         if enabled:
             self._maestro.open()
             self.link_label.setText("conectando…")
+            self.record(Event(Level.INFO, "gui", "MAESTRO_CONECTADO",
+                              f"{self._maestro.host}:{self._maestro.port}"))
         else:
             self._maestro.close()
             self._refresh_maestro(None)
+            self.record(Event(Level.INFO, "gui", "MAESTRO_DESCONECTADO", "por el usuario"))
 
     @Slot(object)
     def _refresh_maestro(self, info: LinkInfo | None):
         is_open = self._maestro.is_open
+        self._link_info = info if is_open else None
         self.arm_button.setEnabled(is_open)
         self.maestro_stop_button.setEnabled(is_open)
         if info is None or not is_open:
@@ -368,12 +446,10 @@ class MainWindow(QMainWindow):
             p95 = f"{info.p95_ms:.0f} ms" if info.p95_ms != float("inf") else "> 800 ms"
             self.latency_label.setText(f"p95 {p95} · {info.within_500:.1%} < 500 ms")
 
-    @Slot(str, str)
-    def _show_rejection(self, command: str, reason: str):
-        self.statusBar().showMessage(f"Maestro rechazó {command}: {reason}", 5_000)
-
     # Qt events -------------------------------------------------------------
     def closeEvent(self, event):
         self._bridge.shutdown()  # releases the camera before exiting
         self._maestro.close()    # sends STOP if this program controls SOFIA
+        self.record(Event(Level.INFO, "gui", "SESION_FINALIZADA"))
+        self._event_log.close()
         super().closeEvent(event)

@@ -12,7 +12,7 @@ from comms.protocol import Gesture
 
 class MaestroBridge(QObject):
     info_changed = Signal(object)   # comms.maestro.LinkInfo
-    rejected = Signal(str, str)     # command, reason
+    event = Signal(object)          # events.Event: errors, recoveries, results
 
     def __init__(self, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT,
                  parent: QObject | None = None):
@@ -30,7 +30,7 @@ class MaestroBridge(QObject):
             return
         self._client = MaestroClient(self.host, self.port,
                                      on_info=self.info_changed.emit,
-                                     on_rejected=self.rejected.emit)
+                                     on_event=self.event.emit)
         self._client.start()
 
     def close(self):

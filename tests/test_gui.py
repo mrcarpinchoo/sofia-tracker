@@ -95,8 +95,7 @@ def test_space_toggles_pause(qtbot, window):
 def test_gestures_are_logged(qtbot, window):
     click(qtbot, window.start_button)
 
-    qtbot.waitUntil(lambda: window.log_list.count() > 0)
-    assert window.gesture_label.text() == "V"
+    qtbot.waitUntil(lambda: window.gesture_label.text() == "V")
     assert window.action_label.text() == ACTION_LABELS["V"]
     assert f"V → {ACTION_LABELS['V']}" in window.log_list.item(0).text()
 

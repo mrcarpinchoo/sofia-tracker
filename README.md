@@ -83,12 +83,36 @@ python -m gui                     # default camera (index 0)
 python -m gui --camera 1          # a specific camera (also selectable in the window)
 python -m gui --no-smooth         # start with smoothing off
 python -m gui --maestro 192.168.4.1:4210   # Maestro address (this is the default)
+python -m gui --log-dir pruebas/    # where to write the event log (default logs/)
+python -m gui --no-log              # don't write an event log
 ```
 
 **Iniciar** opens the camera and starts detecting, **Detener** pauses
 detection (the video keeps playing), **Reanudar** resumes it and
 **Finalizar** stops and releases the camera. Space toggles pause/resume.
 Detection runs on a background thread, so the window stays responsive.
+
+### Errors, recovery and the event log
+
+- **Camera lost while running** (unplugged, taken by another program): the
+  state shows *Reconectando cámara…* and the camera is reopened every 2 s.
+  Detection then resumes with a fresh gesture history. A camera that can't
+  be opened when pressing **Iniciar** shows an error and detection stays
+  stopped.
+- **Maestro not answering**: after 3 commands without a response the link
+  shows *sin respuesta*; the status poll keeps running and the link comes
+  back by itself. If this GUI had pressed **Armar**, it sends ARM again at
+  once (the Maestro releases control after 3 s of silence), unless the
+  outage lasted more than 30 s, the user pressed STOP, or another client
+  took control. Gestures detected while the link is down are dropped, not
+  played late. A STOP without an answer is sent again until confirmed.
+- **Unexpected exceptions** are logged and the application keeps running.
+
+Every session writes `logs/eventos_<date>_<time>.csv` (time, level,
+source, event, detail, action taken, and the program's state at that
+moment): gestures detected, commands accepted or rejected, errors and
+recoveries. Warnings and errors also appear in the **Eventos** list and
+the status bar. `docs/MANEJO_DE_ERRORES.md` lists every event.
 
 Or run the command-line tracker:
 
@@ -134,7 +158,7 @@ password `sofia-maestro`).
    the box or closing the window also sends STOP if this GUI has control.
 
 Rejected commands (for example a gesture while another is still playing)
-appear in the status bar.
+appear in the status bar and the event log.
 
 **From the terminal**, for tests and calibration:
 
@@ -158,9 +182,11 @@ client. `gesture`, `target` and `angles` send ARM first.
 - `comms/`: link to the ESP32 Maestro. `protocol.py` encodes and decodes frames and payloads, `link.py` sends one command and waits for its answer, `maestro.py` (`MaestroClient`) runs the link on a background thread for the GUI, and `python -m comms` is the command-line client.
 - `tracker.py`: command-line front end. Shows the camera in an OpenCV window with the overlay (raw and smoothed palm centroid, posture, FPS).
 - `detection.py`: the detection pipeline, independent of any front end. Camera capture, MediaPipe hand landmarks plus gesture recognition (one frame in, one `Detection` out), the overlay drawing, and `DetectionWorker`, which runs it all on a background thread that can be started, paused, resumed and stopped (used by the GUI).
+- `events.py`: `Event` and `EventLog`, the session's CSV event log.
 - `gestures.py`: posture classification, smoothing filters and the gesture recognizer. The tuning thresholds are at the top of the file.
 - `docs/JUSTIFICACION.md`: design justification (Spanish).
 - `docs/DETECCION.md`: detection rules and smoothing (Spanish). The evaluation protocol, scripts and results live on the `evaluation` branch.
+- `docs/MANEJO_DE_ERRORES.md`: every logged event, when it happens and how it's handled (Spanish).
 - `docs/INTERFAZ.md`: GUI architecture, threading model, wireframe, controls and framework justification (Spanish).
 - `tests/`: pytest suite for the detection worker and the GUI.
 - `find_camera.py`: previews each camera index so you can find your webcam.
